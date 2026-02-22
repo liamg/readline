@@ -50,8 +50,12 @@ func (e *Engine) Refresh() {
 	// 4. Helpers Rendering
 	// We clear everything below the input area to ensure that no artifacts
 	// from previous renders (like longer lines or helpers) remain visible.
-	term.MoveCursorDown(1)
-	term.MoveCursorBackwards(term.GetWidth())
+	// We use NewlineReturn ("\r\n") instead of MoveCursorDown because CUD
+	// (\x1b[1B) is a no-op when the cursor is on the last terminal line,
+	// which would cause ClearScreenBelow to erase the prompt/input line.
+	// NewlineReturn scrolls the terminal when at the bottom, ensuring the
+	// cursor always moves to a new line below.
+	fmt.Print(term.NewlineReturn)
 	fmt.Print(term.ClearScreenBelow)
 	term.MoveCursorUp(1)
 	term.MoveCursorForwards(e.lineCol)
@@ -85,16 +89,8 @@ func (e *Engine) renderHelpers() {
 	compMatches := e.completer.Matches()
 	compSkip := e.completer.DisplaySkipped()
 
-	// 2. Clear below the input line to remove artifacts,
-	// unless we are at the bottom of the screen.
-	termHeight := term.GetLength()
-	if (e.startRows + e.lineRows) < termHeight {
-		term.MoveCursorDown(1)
-		term.MoveCursorBackwards(term.GetWidth())
-		fmt.Print(term.ClearScreenBelow)
-		term.MoveCursorUp(1)
-		term.MoveCursorForwards(e.lineCol)
-	}
+	// Refresh() already cleared below the input line before calling us,
+	// so no additional clear is needed here.
 
 	if hintRows == 0 && (compMatches == 0 || compSkip) {
 		e.hintRows = 0
