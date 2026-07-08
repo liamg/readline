@@ -23,10 +23,11 @@ import (
 
 type fakeDriver struct {
 	bytes.Buffer
-	ops          []string
-	closeCalls   int
-	restoreCalls int
-	events       []terminal.Event
+	ops            []string
+	closeCalls     int
+	restoreCalls   int
+	interruptCalls int
+	events         []terminal.Event
 }
 
 func (d *fakeDriver) Write(p []byte) (int, error) {
@@ -56,6 +57,12 @@ func (d *fakeDriver) Read() (terminal.Event, error) {
 	ev := d.events[0]
 	d.events = d.events[1:]
 	return ev, nil
+}
+
+func (d *fakeDriver) InterruptRead() error {
+	d.interruptCalls++
+	d.ops = append(d.ops, "interrupt-read")
+	return nil
 }
 
 func (d *fakeDriver) Close() error {
@@ -284,6 +291,31 @@ func TestActiveKeymapReturnsEmptyWhenEngineUnset(t *testing.T) {
 	r := &Readline{}
 	if got := r.ActiveKeymap(); got != "" {
 		t.Fatalf("ActiveKeymap = %q, want empty string", got)
+	}
+}
+
+func TestCancelInterruptsActiveReadline(t *testing.T) {
+	d := &fakeDriver{}
+	r := testReadlineWithDriver(d)
+
+	if err := r.Cancel(); err != nil {
+		t.Fatalf("Cancel error: %v", err)
+	}
+	if d.interruptCalls != 1 {
+		t.Fatalf("interrupt calls = %d, want 1", d.interruptCalls)
+	}
+}
+
+func TestCancelNoopsWhenInactive(t *testing.T) {
+	d := &fakeDriver{}
+	r := testReadlineWithDriver(d)
+	r.active = false
+
+	if err := r.Cancel(); err != nil {
+		t.Fatalf("Cancel error: %v", err)
+	}
+	if d.interruptCalls != 0 {
+		t.Fatalf("interrupt calls = %d, want 0", d.interruptCalls)
 	}
 }
 

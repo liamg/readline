@@ -25,6 +25,10 @@ import (
 // ErrInterrupted is returned from Readline() when the user presses Ctrl-C.
 var ErrInterrupted = terminal.ErrInterrupted
 
+// ErrCancelled is returned from Readline() when Cancel interrupts the active
+// input read.
+var ErrCancelled = terminal.ErrCancelled
+
 // ErrClosed is returned when using a Readline after Close.
 var ErrClosed = errors.New("readline is closed")
 
@@ -41,6 +45,8 @@ type Readline struct {
 	active        bool
 	closed        bool
 	suspended     bool
+	handlingKey   bool
+	reading       bool
 	suspendWrites [][]byte
 	stateMu       sync.RWMutex
 	currentBuffer string
@@ -53,6 +59,7 @@ type driver interface {
 	Restore() error
 	Size() (rows, cols int)
 	Read() (terminal.Event, error)
+	InterruptRead() error
 	Close() error
 }
 
@@ -264,6 +271,23 @@ func (r *Readline) ActiveKeymap() string {
 	return r.activeEngine.ActiveKeymap()
 }
 
+// Cancel interrupts an active Readline call without submitting the current
+// buffer. The interrupted Readline call returns ErrCancelled.
+func (r *Readline) Cancel() error {
+	r.mu.RLock()
+	driver := r.driver
+	active := r.active
+	closed := r.closed
+	r.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if !active {
+		return nil
+	}
+	return driver.InterruptRead()
+}
+
 // CurrentBuffer returns the current in-progress input buffer.
 func (r *Readline) CurrentBuffer() string {
 	r.stateMu.RLock()
@@ -334,6 +358,9 @@ func (r *Readline) Suspend(f func() error) error {
 	if !r.isActive() {
 		return fmt.Errorf("cannot suspend, readline is not active")
 	}
+	if err := r.pauseActiveReadForSuspend(); err != nil {
+		return err
+	}
 
 	r.outputMu.Lock()
 	if r.isClosed() {
@@ -381,6 +408,31 @@ func (r *Readline) Suspend(f func() error) error {
 		return r.renderStateLocked()
 	}
 	return nil
+}
+
+func (r *Readline) pauseActiveReadForSuspend() error {
+	r.mu.RLock()
+	driver := r.driver
+	active := r.active
+	handlingKey := r.handlingKey
+	reading := r.reading
+	r.mu.RUnlock()
+	if !active || handlingKey || !reading {
+		return nil
+	}
+	if err := driver.InterruptRead(); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if !r.isActive() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for readline input loop to pause")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Write writes output above the active prompt. When Readline is active, it
@@ -552,7 +604,13 @@ func (r *Readline) Readline() (line string, err error) {
 		if err := r.renderState(); err != nil {
 			return "", err
 		}
+		r.mu.Lock()
+		r.reading = true
+		r.mu.Unlock()
 		evt, err := r.driver.Read()
+		r.mu.Lock()
+		r.reading = false
+		r.mu.Unlock()
 		if err != nil {
 			return "", err
 		}
@@ -561,7 +619,13 @@ func (r *Readline) Readline() (line string, err error) {
 		case terminal.KeyEvent:
 			r.noteKeypress(time.Now())
 
+			r.mu.Lock()
+			r.handlingKey = true
+			r.mu.Unlock()
 			accepted, completeBinding, err := r.activeEngine.HandleKeyEvent(event)
+			r.mu.Lock()
+			r.handlingKey = false
+			r.mu.Unlock()
 			if err != nil {
 				// non-critical error: show a hint so the user understands why their keybinding failed
 				r.editor.SetHint("Warning: " + err.Error())
