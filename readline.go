@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/liamg/readline/pkg/config"
 	"github.com/liamg/readline/pkg/editor"
@@ -41,6 +42,9 @@ type Readline struct {
 	closed        bool
 	suspended     bool
 	suspendWrites [][]byte
+	stateMu       sync.RWMutex
+	currentBuffer string
+	lastKeypress  time.Time
 }
 
 type driver interface {
@@ -258,6 +262,33 @@ func (r *Readline) ActiveKeymap() string {
 		return ""
 	}
 	return r.activeEngine.ActiveKeymap()
+}
+
+// CurrentBuffer returns the current in-progress input buffer.
+func (r *Readline) CurrentBuffer() string {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.currentBuffer
+}
+
+// LastKeypress returns the time of the most recent key event handled by
+// Readline. It returns the zero time before any key event has been handled.
+func (r *Readline) LastKeypress() time.Time {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.lastKeypress
+}
+
+func (r *Readline) setCurrentBuffer(buffer string) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	r.currentBuffer = buffer
+}
+
+func (r *Readline) noteKeypress(t time.Time) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	r.lastKeypress = t
 }
 
 // Close releases the terminal resources owned by Readline. It is safe to call
@@ -500,6 +531,7 @@ func (r *Readline) Readline() (line string, err error) {
 	// reset the buffer contents, as this is fresh input
 	r.activeEngine.Reset()
 	r.editor.Reset()
+	r.setCurrentBuffer("")
 	r.renderer.Reset()
 	r.cfg.History.Reset()
 
@@ -527,6 +559,7 @@ func (r *Readline) Readline() (line string, err error) {
 
 		switch event := evt.(type) {
 		case terminal.KeyEvent:
+			r.noteKeypress(time.Now())
 
 			accepted, completeBinding, err := r.activeEngine.HandleKeyEvent(event)
 			if err != nil {
@@ -537,6 +570,7 @@ func (r *Readline) Readline() (line string, err error) {
 				r.editor.ClearHint()
 			}
 			r.editor.TriggerAutoSuggestion()
+			r.setCurrentBuffer(r.editor.BufferString())
 
 			if accepted {
 				line = r.editor.BufferString()
@@ -555,12 +589,14 @@ func (r *Readline) Readline() (line string, err error) {
 						r.cfg.History.Append(line, true)
 					}
 					r.activeEngine.Reset()
+					r.setCurrentBuffer("")
 					return line, nil
 				}
 				// TODO: we should pass isComplete to the engine somehow so it can make the decision on whether to add a \n
 				// this is multiline! only write a new line to the buffer - this will get translated to a CRLF if needed when rendered
 				// TODO: should we write a \r\n if we're on windows?
 				r.editor.Insert('\n')
+				r.setCurrentBuffer(r.editor.BufferString())
 			} else {
 				if err := r.renderState(); err != nil {
 					return "", err
