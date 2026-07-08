@@ -20,6 +20,7 @@ type Driver struct {
 	pending   []byte
 	sigwinch  chan os.Signal
 	resize    chan ResizeEvent
+	interrupt chan struct{}
 	termState *term.State
 }
 
@@ -29,12 +30,27 @@ func New() (*Driver, error) {
 		return nil, fmt.Errorf("no controlling terminal: %w", err)
 	}
 	d := &Driver{
-		tty:      tty,
-		sigwinch: make(chan os.Signal, 1),
-		resize:   make(chan ResizeEvent, 1),
+		tty:       tty,
+		sigwinch:  make(chan os.Signal, 1),
+		resize:    make(chan ResizeEvent, 1),
+		interrupt: make(chan struct{}, 1),
 	}
 	go d.watchResize()
 	return d, nil
+}
+
+func (d *Driver) InterruptRead() error {
+	d.mu.Lock()
+	closed := d.tty == nil
+	d.mu.Unlock()
+	if closed {
+		return os.ErrClosed
+	}
+	select {
+	case d.interrupt <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (d *Driver) watchResize() {
@@ -372,6 +388,8 @@ func (d *Driver) Read() (Event, error) {
 	for {
 		// Deliver any pending resize event before blocking on input.
 		select {
+		case <-d.interrupt:
+			return nil, ErrCancelled
 		case ev := <-d.resize:
 			return ev, nil
 		default:
@@ -425,6 +443,8 @@ func (d *Driver) readBytes(timeout time.Duration) ([]byte, Event, error) {
 	}
 	for {
 		select {
+		case <-d.interrupt:
+			return nil, nil, ErrCancelled
 		case ev := <-d.resize:
 			return nil, ev, nil
 		default:
