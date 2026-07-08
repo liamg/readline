@@ -287,6 +287,59 @@ func TestActiveKeymapReturnsEmptyWhenEngineUnset(t *testing.T) {
 	}
 }
 
+func TestCurrentBufferTracksInProgressInput(t *testing.T) {
+	d := &fakeDriver{
+		events: []terminal.Event{
+			terminal.KeyEvent{Key: terminal.KeyRune, Rune: 'a'},
+		},
+	}
+	r := testReadlineWithDriver(d)
+	r.activeEngine = emacs.NewEngineWithKeymaps(r.editor, nil, emacs.BuildKeymaps())
+
+	if got := r.CurrentBuffer(); got != "" {
+		t.Fatalf("CurrentBuffer before input = %q, want empty", got)
+	}
+	if got := r.LastKeypress(); !got.IsZero() {
+		t.Fatalf("LastKeypress before input = %v, want zero time", got)
+	}
+	started := time.Now()
+
+	_, err := r.Readline()
+	if err == nil || err.Error() != "not implemented" {
+		t.Fatalf("Readline error = %v, want fake driver exhaustion", err)
+	}
+	if got := r.CurrentBuffer(); got != "a" {
+		t.Fatalf("CurrentBuffer after keypress = %q, want a", got)
+	}
+	if got := r.LastKeypress(); got.Before(started) || got.IsZero() {
+		t.Fatalf("LastKeypress after keypress = %v, want time after %v", got, started)
+	}
+}
+
+func TestCurrentBufferClearsAfterAcceptedInput(t *testing.T) {
+	d := &fakeDriver{
+		events: []terminal.Event{
+			terminal.KeyEvent{Key: terminal.KeyEnter},
+		},
+	}
+	r := testReadlineWithDriver(d)
+	r.activeEngine = acceptingEngine{editor: r.editor, text: "submitted"}
+
+	line, err := r.Readline()
+	if err != nil {
+		t.Fatalf("Readline error: %v", err)
+	}
+	if line != "submitted" {
+		t.Fatalf("line = %q, want submitted", line)
+	}
+	if got := r.CurrentBuffer(); got != "" {
+		t.Fatalf("CurrentBuffer after accept = %q, want empty", got)
+	}
+	if got := r.LastKeypress(); got.IsZero() {
+		t.Fatal("LastKeypress after accept is zero")
+	}
+}
+
 func TestReadline_ResetToInitialKeymapAfterAccept(t *testing.T) {
 	d := &fakeDriver{
 		events: []terminal.Event{
