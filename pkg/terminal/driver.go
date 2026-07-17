@@ -1,11 +1,14 @@
 package terminal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,6 +19,7 @@ import (
 
 type Driver struct {
 	mu        sync.Mutex
+	ioMu      sync.Mutex
 	tty       *os.File
 	pending   []byte
 	sigwinch  chan os.Signal
@@ -23,6 +27,18 @@ type Driver struct {
 	interrupt chan struct{}
 	termState *term.State
 }
+
+var (
+	bracketedPasteEnable  = []byte("\x1b[?2004h")
+	bracketedPasteDisable = []byte("\x1b[?2004l")
+	bracketedPasteStart   = []byte("\x1b[200~")
+	bracketedPasteEnd     = []byte("\x1b[201~")
+)
+
+const (
+	escapeReadTimeout         = 50 * time.Millisecond
+	bracketedPasteReadTimeout = 2 * time.Second
+)
 
 func New() (*Driver, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
@@ -97,6 +113,13 @@ func (d *Driver) MakeRaw() error {
 	d.mu.Lock()
 	d.termState = state
 	d.mu.Unlock()
+	if _, err := d.Write(bracketedPasteEnable); err != nil {
+		_ = d.setNonblock(tty, false)
+		_ = d.withFd(tty, func(fd int) error {
+			return term.Restore(fd, state)
+		})
+		return err
+	}
 	signal.Notify(d.sigwinch, syscall.SIGWINCH)
 	return nil
 }
@@ -107,11 +130,12 @@ func (d *Driver) Restore() error {
 	tty := d.tty
 	state := d.termState
 	d.mu.Unlock()
+	_, disableErr := d.Write(bracketedPasteDisable)
 	_ = d.setNonblock(tty, false)
 	err := d.withFd(tty, func(fd int) error {
 		return term.Restore(fd, state)
 	})
-	return err
+	return errors.Join(disableErr, err)
 }
 
 func (d *Driver) Size() (rows, cols int) {
@@ -194,7 +218,93 @@ func (d *Driver) Write(p []byte) (int, error) {
 	if tty == nil {
 		return 0, os.ErrClosed
 	}
+	d.ioMu.Lock()
+	defer d.ioMu.Unlock()
 	return writeAll(tty, p)
+}
+
+func (d *Driver) CursorPosition() (row, col int, err error) {
+	d.ioMu.Lock()
+	defer d.ioMu.Unlock()
+
+	d.mu.Lock()
+	tty := d.tty
+	d.mu.Unlock()
+	if tty == nil {
+		return 0, 0, os.ErrClosed
+	}
+
+	if _, err := writeAll(tty, []byte("\x1b[6n")); err != nil {
+		return 0, 0, err
+	}
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	var buf []byte
+	for time.Now().Before(deadline) {
+		tmp := make([]byte, 64)
+		n, err := tty.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if row, col, start, consumed, ok := parseCursorPositionResponse(buf); ok {
+				preserve := append([]byte{}, buf[:start]...)
+				preserve = append(preserve, buf[consumed:]...)
+				if len(preserve) > 0 {
+					d.prependPending(preserve)
+				}
+				return row, col, nil
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return 0, 0, err
+	}
+	if len(buf) > 0 {
+		d.prependPending(buf)
+	}
+	return 0, 0, errReadTimeout
+}
+
+func (d *Driver) prependPending(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending = append(append([]byte{}, b...), d.pending...)
+}
+
+func parseCursorPositionResponse(b []byte) (row, col, start, consumed int, ok bool) {
+	start = bytes.Index(b, []byte("\x1b["))
+	if start == -1 {
+		return 0, 0, 0, 0, false
+	}
+	endRel := bytes.IndexByte(b[start:], 'R')
+	if endRel == -1 {
+		return 0, 0, 0, 0, false
+	}
+	end := start + endRel
+	body := string(b[start+2 : end])
+	parts := strings.Split(body, ";")
+	if len(parts) != 2 {
+		return 0, 0, 0, 0, false
+	}
+	row, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, 0, 0, false
+	}
+	col, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, 0, 0, false
+	}
+	return row, col, start, end + 1, true
 }
 
 func writeAll(w io.Writer, p []byte) (int, error) {
@@ -229,6 +339,15 @@ type KeyEvent struct {
 }
 
 func (KeyEvent) event() {}
+
+// PasteEvent represents bytes received between terminal bracketed-paste
+// delimiters. Its text should be inserted literally, without key binding
+// interpretation.
+type PasteEvent struct {
+	Text string
+}
+
+func (PasteEvent) event() {}
 
 // String returns a human-readable representation of the key event, e.g.
 // "ctrl+a", "shift+up", "f1", or "a".
@@ -396,22 +515,33 @@ func (d *Driver) Read() (Event, error) {
 		}
 
 		// Refill the pending buffer if empty.
-		if len(d.pending) == 0 {
-			b, ev, err := d.readBytes(0)
+		d.mu.Lock()
+		pendingLen := len(d.pending)
+		d.mu.Unlock()
+		if pendingLen == 0 {
+			b, ev, err := d.readBytes(0, true)
 			if ev != nil {
 				return ev, nil
 			}
 			if err != nil {
 				return nil, err
 			}
+			d.mu.Lock()
 			d.pending = b
+			d.mu.Unlock()
 		}
 
 		// Read more bytes until the escape sequence at the front is complete
 		// or the read-ahead times out.
 	readEscape:
-		for isIncompleteEscape(d.pending) {
-			b, ev, err := d.readBytes(50 * time.Millisecond)
+		for {
+			d.mu.Lock()
+			incomplete := isIncompleteEscape(d.pending)
+			d.mu.Unlock()
+			if !incomplete {
+				break
+			}
+			b, ev, err := d.readBytes(d.readAheadTimeout(), false)
 			if ev != nil {
 				return ev, nil
 			}
@@ -421,12 +551,20 @@ func (d *Driver) Read() (Event, error) {
 			if err != nil {
 				return nil, err
 			}
+			d.mu.Lock()
 			d.pending = append(d.pending, b...)
+			d.mu.Unlock()
 		}
 
 		// Parse one event from the front of the pending buffer.
+		d.mu.Lock()
 		event, n, err := parseEvent(d.pending)
-		d.pending = d.pending[n:]
+		if n <= len(d.pending) {
+			d.pending = d.pending[n:]
+		} else {
+			d.pending = nil
+		}
+		d.mu.Unlock()
 		if err != nil {
 			return nil, err
 		}
@@ -436,12 +574,32 @@ func (d *Driver) Read() (Event, error) {
 
 var errReadTimeout = errors.New("terminal read timeout")
 
-func (d *Driver) readBytes(timeout time.Duration) ([]byte, Event, error) {
+func (d *Driver) readAheadTimeout() time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if bytes.HasPrefix(d.pending, bracketedPasteStart) {
+		return bracketedPasteReadTimeout
+	}
+	return escapeReadTimeout
+}
+
+func (d *Driver) readBytes(timeout time.Duration, drainPending bool) ([]byte, Event, error) {
 	deadline := time.Time{}
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
 	for {
+		if drainPending {
+			d.mu.Lock()
+			if len(d.pending) > 0 {
+				b := append([]byte{}, d.pending...)
+				d.pending = nil
+				d.mu.Unlock()
+				return b, nil, nil
+			}
+			d.mu.Unlock()
+		}
+
 		select {
 		case <-d.interrupt:
 			return nil, nil, ErrCancelled
@@ -458,7 +616,9 @@ func (d *Driver) readBytes(timeout time.Duration) ([]byte, Event, error) {
 		}
 
 		buf := make([]byte, 64)
+		d.ioMu.Lock()
 		n, err := tty.Read(buf)
+		d.ioMu.Unlock()
 		if n > 0 {
 			b := make([]byte, n)
 			copy(b, buf[:n])
@@ -486,6 +646,12 @@ func (d *Driver) readBytes(timeout time.Duration) ([]byte, Event, error) {
 func isIncompleteEscape(b []byte) bool {
 	if len(b) == 0 || b[0] != 0x1b {
 		return false
+	}
+	if bytes.HasPrefix(bracketedPasteStart, b) {
+		return true
+	}
+	if bytes.HasPrefix(b, bracketedPasteStart) {
+		return !bytes.Contains(b[len(bracketedPasteStart):], bracketedPasteEnd)
 	}
 	if len(b) == 1 {
 		return true // bare ESC — may be start of sequence
@@ -519,6 +685,14 @@ func parseEvent(b []byte) (Event, int, error) {
 
 	// Escape sequences
 	if b[0] == 0x1b {
+		if bytes.HasPrefix(b, bracketedPasteStart) {
+			payload := b[len(bracketedPasteStart):]
+			end := bytes.Index(payload, bracketedPasteEnd)
+			if end == -1 {
+				return nil, 0, io.EOF
+			}
+			return PasteEvent{Text: string(payload[:end])}, len(bracketedPasteStart) + end + len(bracketedPasteEnd), nil
+		}
 		if len(b) == 1 {
 			return KeyEvent{Key: KeyEscape}, 1, nil
 		}
@@ -581,6 +755,9 @@ func parseCsi(b []byte) (Event, int, error) {
 	}
 	seq := string(b[:end+1])
 	consumed := end + 1
+	if ev, ok := parseExtendedCsiKey(seq); ok {
+		return ev, consumed, nil
+	}
 
 	switch seq {
 	case "A":
@@ -632,6 +809,53 @@ func parseCsi(b []byte) (Event, int, error) {
 	}
 
 	return KeyEvent{Key: KeyEscape}, consumed, nil
+}
+
+func parseExtendedCsiKey(seq string) (KeyEvent, bool) {
+	if strings.HasSuffix(seq, "u") {
+		parts := strings.Split(strings.TrimSuffix(seq, "u"), ";")
+		if len(parts) < 1 || len(parts) > 2 {
+			return KeyEvent{}, false
+		}
+		code, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return KeyEvent{}, false
+		}
+		var mod Modifier
+		if len(parts) == 2 {
+			modNumber, err := strconv.Atoi(parts[1])
+			if err != nil {
+				return KeyEvent{}, false
+			}
+			mod = csiModifierNumber(modNumber)
+		}
+		switch code {
+		case 13:
+			return KeyEvent{Key: KeyEnter, Mod: mod}, true
+		}
+		return KeyEvent{}, false
+	}
+
+	if strings.HasSuffix(seq, "~") {
+		parts := strings.Split(strings.TrimSuffix(seq, "~"), ";")
+		if len(parts) != 3 || parts[0] != "27" {
+			return KeyEvent{}, false
+		}
+		modNumber, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return KeyEvent{}, false
+		}
+		code, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return KeyEvent{}, false
+		}
+		switch code {
+		case 13:
+			return KeyEvent{Key: KeyEnter, Mod: csiModifierNumber(modNumber)}, true
+		}
+	}
+
+	return KeyEvent{}, false
 }
 
 // parseSs3 handles sequences of the form ESC O ... (SS3).
@@ -726,7 +950,11 @@ func parseControlKey(b byte) (KeyEvent, int) {
 // The encoding is: value = modifier_number - 1, where the modifier number is
 // a bitmask of shift(1), alt(2), ctrl(4).
 func csiModifier(b byte) Modifier {
-	v := int(b-'0') - 1
+	return csiModifierNumber(int(b - '0'))
+}
+
+func csiModifierNumber(n int) Modifier {
+	v := n - 1
 	var mod Modifier
 	if v&1 != 0 {
 		mod |= ModShift

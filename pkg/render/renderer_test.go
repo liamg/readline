@@ -17,6 +17,17 @@ import (
 // bufWriter is a simple io.Writer backed by a bytes.Buffer.
 type bufWriter struct{ bytes.Buffer }
 
+type positionedBufWriter struct {
+	bytes.Buffer
+	row int
+	col int
+	err error
+}
+
+func (w *positionedBufWriter) CursorPosition() (int, int, error) {
+	return w.row, w.col, w.err
+}
+
 // errWriter always returns an error on Write.
 type errWriter struct{ err error }
 
@@ -774,6 +785,25 @@ func TestRenderer_Render_StateAfterRender(t *testing.T) {
 	}
 }
 
+func TestRenderer_Render_HidesCursorDuringWrite(t *testing.T) {
+	w := &bufWriter{}
+	r := newTestRenderer(w)
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.editor.Insert('x')
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+
+	got := w.String()
+	if !strings.HasPrefix(got, "\x1b[?25l") {
+		t.Fatalf("render should hide cursor before writes: %q", got)
+	}
+	if !strings.HasSuffix(got, "\x1b[?25h") {
+		t.Fatalf("render should show cursor after writes: %q", got)
+	}
+}
+
 // TestRenderer_Render_CursorColumnAtEnd verifies the final \x1b[NG escape
 // positions the cursor after the full prompt+buffer content.
 // Prompt "> " (width 2) + buffer "hi" (width 2) → column 5.
@@ -1057,6 +1087,29 @@ func TestRenderer_Render_CompletionCandidatesInOutput(t *testing.T) {
 	}
 }
 
+func TestRenderer_Render_SelectedCompletionUsesReverseVideo(t *testing.T) {
+	w := &bufWriter{}
+	r := newTestRenderer(w)
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.editor = editor.New(editor.WithCompleter(staticCompleter{
+		candidates: []completionCandidate{
+			{name: "alpha", desc: "first"},
+			{name: "beta", desc: "second"},
+		},
+	}))
+	r.editor.Insert('a')
+	r.editor.TriggerCompletions()
+	r.editor.SelectNextCompletion()
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+	got := w.String()
+	if !strings.Contains(got, ";7") {
+		t.Fatalf("selected completion should use reverse video: %q", got)
+	}
+}
+
 func TestRenderer_Render_CompletionsLimitedToAvailableTerminalHeight(t *testing.T) {
 	w := &bufWriter{}
 	r := newTestRenderer(w)
@@ -1086,6 +1139,148 @@ func TestRenderer_Render_CompletionsLimitedToAvailableTerminalHeight(t *testing.
 	}
 	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows > r.height {
 		t.Fatalf("rendered rows = %d, want <= terminal height %d", rows, r.height)
+	}
+}
+
+func TestRenderer_Render_AnchorBottomDefaultsOff(t *testing.T) {
+	w := &bufWriter{}
+	r := newTestRenderer(w)
+	r.SetSize(80, 6)
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.editor.Insert('a')
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows != 1 {
+		t.Fatalf("rendered rows = %d, want no anchor padding", rows)
+	}
+}
+
+func TestRenderer_Render_AnchorBottomPadsToTerminalHeight(t *testing.T) {
+	w := &positionedBufWriter{row: 4, col: 1}
+	r := newTestRenderer(w)
+	r.SetSize(80, 6)
+	r.config.AnchorBottom = true
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.editor.Insert('a')
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows != 3 {
+		t.Fatalf("rendered rows = %d, want remaining rows from cursor to bottom", rows)
+	}
+	if got := r.state.previousCursorY; got != 2 {
+		t.Fatalf("previousCursorY = %d, want bottom row of render area 2", got)
+	}
+	last := r.state.previousLines[len(r.state.previousLines)-1]
+	if got := lineStr(last.Line); got != "> a" {
+		t.Fatalf("bottom rendered line = %q, want prompt+buffer", got)
+	}
+}
+
+func TestRenderer_Render_AnchorBottomRecalculatesWhenCompletionsShrink(t *testing.T) {
+	w := &positionedBufWriter{row: 3, col: 1}
+	r := newTestRenderer(w)
+	r.SetSize(80, 8)
+	r.config.AnchorBottom = true
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.editor = editor.New(editor.WithCompleter(staticCompleter{
+		candidates: []completionCandidate{
+			{name: "alpha", desc: "first"},
+			{name: "beta", desc: "second"},
+			{name: "gamma", desc: "third"},
+		},
+	}))
+	r.editor.Insert('a')
+	r.editor.TriggerCompletions()
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("first Render error: %v", err)
+	}
+	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows != 6 {
+		t.Fatalf("first render rows = %d, want remaining rows from cursor to bottom", rows)
+	}
+
+	r.editor.ClearCompletions()
+	w.Reset()
+	w.row = 3 + r.state.previousCursorY
+	if err := r.Render(); err != nil {
+		t.Fatalf("second Render error: %v", err)
+	}
+	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows != 6 {
+		t.Fatalf("second render rows = %d, want remaining rows from render start to bottom", rows)
+	}
+	if got := r.state.previousCursorY; got != 5 {
+		t.Fatalf("previousCursorY = %d, want bottom row of render area 5", got)
+	}
+	last := r.state.previousLines[len(r.state.previousLines)-1]
+	if got := lineStr(last.Line); got != "> a" {
+		t.Fatalf("bottom rendered line = %q, want prompt+buffer", got)
+	}
+}
+
+func TestRenderer_Render_AnchorBottomAcceptCompletionClearsOldCandidateLine(t *testing.T) {
+	w := &positionedBufWriter{row: 3, col: 1}
+	r := newTestRenderer(w)
+	r.SetSize(120, 8)
+	r.config.AnchorBottom = true
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.config.StatusLine = func(_, _ int) string { return "status" }
+	r.editor = editor.New(editor.WithCompleter(staticCompleter{
+		candidates: []completionCandidate{
+			{name: "/resume", desc: "Resume a previous chat session"},
+			{name: "/model", desc: "Select the model to use for chat"},
+		},
+	}))
+	r.editor.Insert('/')
+	r.editor.TriggerCompletions()
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("first Render error: %v", err)
+	}
+	if !r.editor.AcceptSelectedCompletion() {
+		t.Fatal("AcceptSelectedCompletion = false, want true")
+	}
+	w.Reset()
+	w.row = 3 + r.state.previousCursorY
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("second Render error: %v", err)
+	}
+	got := w.String()
+	if !strings.Contains(got, "\x1b[K> /resume") {
+		t.Fatalf("accepting completion should clear prompt line before redraw: %q", got)
+	}
+	promptLine := r.state.previousLines[len(r.state.previousLines)-2]
+	if got := lineStr(promptLine.Line); got != "> /resume" {
+		t.Fatalf("bottom rendered line = %q, want accepted completion only", got)
+	}
+}
+
+func TestRenderer_Render_AnchorBottomRecalculatesAfterResize(t *testing.T) {
+	w := &positionedBufWriter{row: 3, col: 1}
+	r := newTestRenderer(w)
+	r.SetSize(80, 8)
+	r.config.AnchorBottom = true
+	r.config.Prompt = func(_, _ int) string { return "> " }
+	r.editor.Insert('a')
+
+	if err := r.Render(); err != nil {
+		t.Fatalf("first Render error: %v", err)
+	}
+	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows != 6 {
+		t.Fatalf("first render rows = %d, want remaining rows from cursor to bottom", rows)
+	}
+
+	r.SetSize(80, 4)
+	w.row = 2
+	if err := r.Render(); err != nil {
+		t.Fatalf("second Render error: %v", err)
+	}
+	if rows := queuedPhysicalRows(r.state.previousLines, r.width); rows != 3 {
+		t.Fatalf("second render rows = %d, want resized remaining rows", rows)
 	}
 }
 

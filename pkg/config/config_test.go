@@ -96,6 +96,17 @@ func TestWithHidePromptOnSubmit(t *testing.T) {
 	}
 }
 
+func TestWithAnchorBottom(t *testing.T) {
+	cfg := config.Default("")
+	if cfg.AnchorBottom {
+		t.Fatal("AnchorBottom should default to false")
+	}
+	config.WithAnchorBottom(true)(&cfg)
+	if !cfg.AnchorBottom {
+		t.Fatal("AnchorBottom should be true")
+	}
+}
+
 func TestWithHideAcceptedLineOnSubmit(t *testing.T) {
 	cfg := config.Default("")
 	config.WithHideAcceptedLineOnSubmit(true)(&cfg)

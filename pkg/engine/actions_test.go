@@ -94,6 +94,55 @@ func TestAcceptLine_ReturnsComplete(t *testing.T) {
 	}
 }
 
+func TestAcceptCompletionOrLine_AcceptsSelectedCompletion(t *testing.T) {
+	groups := []completion.Group{{
+		Candidates: []completion.Candidate{
+			{Name: "alpha"},
+			{Name: "actual", Content: "actual-value"},
+		},
+	}}
+	ed := editor.New(editor.WithCompleter(staticCompleter{groups: groups}))
+	ed.SetBuffer([]rune("act"))
+	ed.TriggerCompletions()
+	ed.SelectNextCompletion()
+	ctx := &ActionContext{Editor: ed}
+
+	res := run(t, AcceptCompletionOrLine, ctx)
+
+	if res.Complete {
+		t.Fatal("AcceptCompletionOrLine with visible completion: Complete should be false")
+	}
+	if got := ed.BufferString(); got != "actual-value" {
+		t.Fatalf("buffer = %q, want %q", got, "actual-value")
+	}
+}
+
+func TestAcceptCompletionOrLine_AcceptsLineWithoutCompletions(t *testing.T) {
+	ctx := newCtxEnd("abc")
+
+	res := run(t, AcceptCompletionOrLine, ctx)
+
+	if !res.Complete {
+		t.Fatal("AcceptCompletionOrLine without completions: Complete should be true")
+	}
+}
+
+func TestInsertNewline_InsertsWithoutCompleting(t *testing.T) {
+	ctx := newCtx("abcd", 2)
+
+	res := run(t, InsertNewline, ctx)
+
+	if res.Complete {
+		t.Fatal("InsertNewline: Complete should be false")
+	}
+	if got := ctx.Editor.BufferString(); got != "ab\ncd" {
+		t.Fatalf("InsertNewline: buffer = %q, want %q", got, "ab\ncd")
+	}
+	if got := ctx.Editor.Cursor(); got != 3 {
+		t.Fatalf("InsertNewline: cursor = %d, want 3", got)
+	}
+}
+
 func TestComplete_TriggersEditorCompletions(t *testing.T) {
 	want := []completion.Group{{
 		Name: "files",
@@ -112,6 +161,44 @@ func TestComplete_TriggersEditorCompletions(t *testing.T) {
 		return a.Name == b.Name && slices.Equal(a.Candidates, b.Candidates)
 	}) {
 		t.Fatalf("completions = %#v, want %#v", got, want)
+	}
+}
+
+func TestCompletionNextOrHistoryNext_SelectsVisibleCompletion(t *testing.T) {
+	groups := []completion.Group{{
+		Candidates: []completion.Candidate{
+			{Name: "alpha"},
+			{Name: "beta"},
+		},
+	}}
+	ed := editor.New(editor.WithCompleter(staticCompleter{groups: groups}))
+	ed.SetBuffer([]rune("a"))
+	ed.TriggerCompletions()
+	ctx := &ActionContext{Editor: ed}
+
+	run(t, CompletionNextOrHistoryNext, ctx)
+
+	if selected, ok := ed.SelectedCompletion(); !ok || selected != 1 {
+		t.Fatalf("selected completion = (%d, %v), want (1, true)", selected, ok)
+	}
+}
+
+func TestCompletionPreviousOrHistoryPrevious_SelectsVisibleCompletion(t *testing.T) {
+	groups := []completion.Group{{
+		Candidates: []completion.Candidate{
+			{Name: "alpha"},
+			{Name: "beta"},
+		},
+	}}
+	ed := editor.New(editor.WithCompleter(staticCompleter{groups: groups}))
+	ed.SetBuffer([]rune("a"))
+	ed.TriggerCompletions()
+	ctx := &ActionContext{Editor: ed}
+
+	run(t, CompletionPreviousOrHistoryPrevious, ctx)
+
+	if selected, ok := ed.SelectedCompletion(); !ok || selected != 1 {
+		t.Fatalf("selected completion = (%d, %v), want (1, true)", selected, ok)
 	}
 }
 

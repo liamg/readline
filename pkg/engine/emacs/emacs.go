@@ -33,8 +33,8 @@ func BuildKeymaps() map[string]*engine.Keymap {
 			{Sequence: keymap.MustParseSequence("ctrl-left"), Action: BackwardWord},
 			{Sequence: keymap.MustParseSequence("ctrl-right"), Action: ForwardWord},
 			// History
-			{Sequence: keymap.MustParseSequence("ctrl-p"), Action: engine.HistoryPrevious},
-			{Sequence: keymap.MustParseSequence("ctrl-n"), Action: engine.HistoryNext},
+			{Sequence: keymap.MustParseSequence("ctrl-p"), Action: engine.CompletionPreviousOrHistoryPrevious},
+			{Sequence: keymap.MustParseSequence("ctrl-n"), Action: engine.CompletionNextOrHistoryNext},
 			// Editing
 			{Sequence: keymap.MustParseSequence("ctrl-t"), Action: TransposeChars},
 			{Sequence: keymap.MustParseSequence("ctrl-y"), Action: Yank},

@@ -95,6 +95,7 @@ type Editor struct {
 
 	completer      completion.Completer
 	completions    []completion.Group
+	completion     int
 	suggester      suggestion.Suggester
 	autosuggestion []rune
 
@@ -177,10 +178,18 @@ func (e *Editor) TriggerAutoSuggestion() {
 
 func (e *Editor) ClearCompletions() {
 	e.completions = nil
+	e.completion = 0
 }
 
 func (e *Editor) GetCompletions() []completion.Group {
 	return e.completions
+}
+
+func (e *Editor) SelectedCompletion() (int, bool) {
+	if len(flattenCompletionCandidates(e.completions)) == 0 {
+		return 0, false
+	}
+	return e.completion, true
 }
 
 func (e *Editor) refreshCompletions() {
@@ -189,19 +198,23 @@ func (e *Editor) refreshCompletions() {
 	}
 	if e.completer == nil || e.buffer.Len() == 0 {
 		e.completions = nil
+		e.completion = 0
 		return
 	}
 	groups := e.completer.Complete(e.buffer.Slice(0, e.buffer.Len()), e.Cursor())
 	if len(flattenCompletionCandidates(groups)) == 0 {
 		e.completions = nil
+		e.completion = 0
 		return
 	}
 	e.completions = groups
+	e.clampSelectedCompletion()
 }
 
 func (e *Editor) TriggerCompletions() {
 	if e.applyVisibleCompletionContinuation() {
 		e.completions = nil
+		e.completion = 0
 		return
 	}
 	if e.completer == nil {
@@ -210,9 +223,64 @@ func (e *Editor) TriggerCompletions() {
 	groups := e.completer.Complete(e.buffer.Slice(0, e.buffer.Len()), e.Cursor())
 	if e.applyCompletionPrefix(groups) {
 		e.completions = nil
+		e.completion = 0
 		return
 	}
 	e.completions = groups
+	e.completion = 0
+	e.clampSelectedCompletion()
+}
+
+func (e *Editor) SelectNextCompletion() bool {
+	return e.moveSelectedCompletion(1)
+}
+
+func (e *Editor) SelectPreviousCompletion() bool {
+	return e.moveSelectedCompletion(-1)
+}
+
+func (e *Editor) AcceptSelectedCompletion() bool {
+	candidates := flattenCompletionCandidates(e.completions)
+	if len(candidates) == 0 {
+		return false
+	}
+	e.clampSelectedCompletion()
+	candidate := candidates[e.completion]
+	content := []rune(completionCandidateContent(candidate))
+	if candidate.Join != "" {
+		content = append(content, []rune(candidate.Join)...)
+	}
+	start, _ := e.completionReplacementStart(content)
+	e.replaceRange(start, e.cursor, content)
+	e.completions = nil
+	e.completion = 0
+	return true
+}
+
+func (e *Editor) moveSelectedCompletion(offset int) bool {
+	candidates := flattenCompletionCandidates(e.completions)
+	if len(candidates) == 0 {
+		return false
+	}
+	e.completion = (e.completion + offset) % len(candidates)
+	if e.completion < 0 {
+		e.completion += len(candidates)
+	}
+	return true
+}
+
+func (e *Editor) clampSelectedCompletion() {
+	candidates := flattenCompletionCandidates(e.completions)
+	if len(candidates) == 0 {
+		e.completion = 0
+		return
+	}
+	if e.completion < 0 {
+		e.completion = 0
+	}
+	if e.completion >= len(candidates) {
+		e.completion = len(candidates) - 1
+	}
 }
 
 func (e *Editor) applyVisibleCompletionContinuation() bool {
@@ -380,6 +448,7 @@ func (e *Editor) Reset() {
 	e.selection = nil
 	e.autosuggestion = nil
 	e.completions = nil
+	e.completion = 0
 	e.logs = e.logs[:0]
 }
 
@@ -409,6 +478,7 @@ func (e *Editor) SetBuffer(s []rune) {
 	e.selection = nil
 	e.autosuggestion = nil
 	e.completions = nil
+	e.completion = 0
 }
 
 // SetSelectionAnchor starts a visual selection of the given type anchored at

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -428,6 +429,34 @@ func TestReadline_RedrawsPromptOnResize(t *testing.T) {
 	}
 }
 
+func TestReadline_RedrawUsesIncrementalRender(t *testing.T) {
+	d := &fakeDriver{}
+	r := testReadlineWithDriver(d)
+	status := "first"
+	r.cfg.Prompt = func(_, _ int) string { return "> " }
+	r.cfg.StatusLine = func(_, _ int) string { return status }
+	r.renderer = render.New(r.cfg, r.editor, d)
+	r.renderer.SetSize(80, 24)
+	r.active = true
+
+	if err := r.renderStateLocked(); err != nil {
+		t.Fatalf("initial render: %v", err)
+	}
+	d.Reset()
+	d.ops = nil
+
+	status = "second"
+	if err := r.Redraw(); err != nil {
+		t.Fatalf("Redraw error: %v", err)
+	}
+	if clearAt := indexWriteContaining(d.ops, "\r\x1b[J"); clearAt != -1 {
+		t.Fatalf("ops = %v, redraw should not clear the whole prompt before rendering", d.ops)
+	}
+	if statusAt := indexWriteContaining(d.ops, "second"); statusAt == -1 {
+		t.Fatalf("ops = %v, want updated status rendered", d.ops)
+	}
+}
+
 func TestWrite_ClearsRenderedMultilinePromptBeforeOutput(t *testing.T) {
 	d := &fakeDriver{}
 	r := testReadlineWithDriver(d)
@@ -613,7 +642,7 @@ func TestReadline_AcceptsMultilineInputWithoutOverwritingContinuationLine(t *tes
 		t.Fatalf("line = %q, want multiline input", line)
 	}
 
-	got := d.String()
+	got := stripCSI(d.String())
 	if !strings.Contains(got, "echo hello\\\r\nworld") {
 		t.Fatalf("accepted multiline input rendered incorrectly: %q", got)
 	}
@@ -621,6 +650,37 @@ func TestReadline_AcceptsMultilineInputWithoutOverwritingContinuationLine(t *tes
 	finalNewlineAt := strings.LastIndex(got, "\r\n")
 	if worldAt == -1 || finalNewlineAt == -1 || finalNewlineAt < worldAt {
 		t.Fatalf("final newline should be emitted after continuation line: %q", got)
+	}
+}
+
+func TestReadline_ShiftEnterInsertsNewlineWithoutCompletenessCheck(t *testing.T) {
+	d := &fakeDriver{
+		events: []terminal.Event{
+			terminal.KeyEvent{Key: terminal.KeyRune, Rune: 'a'},
+			terminal.KeyEvent{Key: terminal.KeyRune, Rune: 'b'},
+			terminal.KeyEvent{Key: terminal.KeyEnter, Mod: terminal.ModShift},
+			terminal.KeyEvent{Key: terminal.KeyRune, Rune: 'c'},
+			terminal.KeyEvent{Key: terminal.KeyEnter},
+		},
+	}
+	r := testReadlineWithDriver(d)
+	r.activeEngine = emacs.NewEngine(r.editor, r.cfg.History)
+
+	var checks []string
+	r.cfg.IsComplete = func(line []rune) bool {
+		checks = append(checks, string(line))
+		return true
+	}
+
+	line, err := r.Readline()
+	if err != nil {
+		t.Fatalf("Readline error: %v", err)
+	}
+	if line != "ab\nc" {
+		t.Fatalf("line = %q, want %q", line, "ab\nc")
+	}
+	if len(checks) != 1 || checks[0] != "ab\nc" {
+		t.Fatalf("IsComplete checks = %#v, want only final buffer", checks)
 	}
 }
 
@@ -841,6 +901,26 @@ func TestReadline_HideAcceptedLineOnSubmit(t *testing.T) {
 	}
 }
 
+func TestReadline_BracketedPasteInsertsLiteralText(t *testing.T) {
+	d := &fakeDriver{
+		events: []terminal.Event{
+			terminal.PasteEvent{Text: "alpha\x03beta\r\ngamma"},
+			terminal.KeyEvent{Key: terminal.KeyEnter},
+		},
+	}
+	r := testReadlineWithDriver(d)
+	r.active = false
+	r.activeEngine = emacs.NewEngine(r.editor, r.cfg.History)
+
+	line, err := r.Readline()
+	if err != nil {
+		t.Fatalf("Readline error: %v", err)
+	}
+	if line != "alpha\x03beta\ngamma" {
+		t.Fatalf("line = %q, want pasted text with literal control char and normalized newline", line)
+	}
+}
+
 func TestClose_ClosesDriverAndIsIdempotent(t *testing.T) {
 	d := &fakeDriver{}
 	r := testReadlineWithDriver(d)
@@ -943,6 +1023,12 @@ func indexWriteContaining(ops []string, text string) int {
 		}
 	}
 	return -1
+}
+
+var csiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+func stripCSI(s string) string {
+	return csiEscapeRe.ReplaceAllString(s, "")
 }
 
 func testAction(name string) *engine.Action {

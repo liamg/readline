@@ -6,9 +6,10 @@ import (
 )
 
 var Bindings = []engine.Binding{
-	{Sequence: keymap.MustParseSequence("enter"), Action: engine.AcceptLine},
-	{Sequence: keymap.MustParseSequence("up"), Action: engine.HistoryPrevious},
-	{Sequence: keymap.MustParseSequence("down"), Action: engine.HistoryNext},
+	{Sequence: keymap.MustParseSequence("enter"), Action: engine.AcceptCompletionOrLine},
+	{Sequence: keymap.MustParseSequence("shift-enter"), Action: engine.InsertNewline},
+	{Sequence: keymap.MustParseSequence("up"), Action: engine.CompletionPreviousOrHistoryPrevious},
+	{Sequence: keymap.MustParseSequence("down"), Action: engine.CompletionNextOrHistoryNext},
 	{Sequence: keymap.MustParseSequence("left"), Action: engine.Back},
 	{Sequence: keymap.MustParseSequence("right"), Action: engine.AcceptAutosuggestionOrForward},
 	{Sequence: keymap.MustParseSequence("tab"), Action: engine.Complete},
