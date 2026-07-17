@@ -445,6 +445,7 @@ func (e *Editor) replaceRange(start, end int, value []rune) {
 func (e *Editor) Reset() {
 	e.buffer = buffer.NewSlice()
 	e.cursor = 0
+	e.clampCursorBeforeEnd = false
 	e.selection = nil
 	e.autosuggestion = nil
 	e.completions = nil
