@@ -160,6 +160,18 @@ func TestEditor_TriggerAutoSuggestion(t *testing.T) {
 		t.Fatalf("autosuggestion = %q, want %q", got, "bar")
 	}
 
+	// Moving away from the end hides the stored suggestion.
+	e2.MoveCursor(-1)
+	if e2.GetAutoSuggestion() != nil {
+		t.Fatal("autosuggestion should not be offered before the end of the buffer")
+	}
+
+	// Triggering away from the end clears stale suggestions.
+	e2.TriggerAutoSuggestion()
+	if e2.GetAutoSuggestion() != nil {
+		t.Fatal("autosuggestion should clear when triggered before the end of the buffer")
+	}
+
 	// Empty buffer clears any existing suggestion without calling the suggester.
 	e2.SetBuffer([]rune(""))
 	e2.TriggerAutoSuggestion()
