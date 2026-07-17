@@ -153,11 +153,18 @@ func (e *Editor) GetLogs() []string {
 }
 
 func (e *Editor) GetAutoSuggestion() []rune {
+	if e.cursor != e.buffer.Len() {
+		return nil
+	}
 	return e.autosuggestion
 }
 
 func (e *Editor) TriggerAutoSuggestion() {
 	if e.suggester == nil {
+		return
+	}
+	if e.cursor != e.buffer.Len() {
+		e.autosuggestion = nil
 		return
 	}
 	runes := e.buffer.Slice(0, e.buffer.Len())

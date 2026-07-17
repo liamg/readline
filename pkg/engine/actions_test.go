@@ -45,6 +45,14 @@ func (s staticCompleter) Complete(_ []rune, _ int) []completion.Group {
 	return s.groups
 }
 
+type staticSuggester struct {
+	suggestion []rune
+}
+
+func (s staticSuggester) Suggest(_ []rune) []rune {
+	return s.suggestion
+}
+
 // ---- KillRing --------------------------------------------------------------
 
 func TestKillRing_PushPeek(t *testing.T) {
@@ -140,6 +148,71 @@ func TestForward_AtEndIsNoOp(t *testing.T) {
 	run(t, Forward, ctx)
 	if ctx.Editor.Cursor() != 3 {
 		t.Fatalf("Forward at end: cursor = %d, want 3", ctx.Editor.Cursor())
+	}
+}
+
+// ---- AcceptAutosuggestion --------------------------------------------------
+
+func TestAcceptAutosuggestion_InsertsAtEnd(t *testing.T) {
+	ed := editor.New(editor.WithSuggester(staticSuggester{suggestion: []rune("bar")}))
+	ed.SetBuffer([]rune("foo"))
+	ed.TriggerAutoSuggestion()
+	ctx := &ActionContext{Editor: ed}
+
+	run(t, AcceptAutosuggestion, ctx)
+
+	if got := ctx.Editor.BufferString(); got != "foobar" {
+		t.Fatalf("AcceptAutosuggestion: buffer = %q, want %q", got, "foobar")
+	}
+}
+
+func TestAcceptAutosuggestion_IgnoresSuggestionBeforeEnd(t *testing.T) {
+	ed := editor.New(editor.WithSuggester(staticSuggester{suggestion: []rune("bar")}))
+	ed.SetBuffer([]rune("foo"))
+	ed.TriggerAutoSuggestion()
+	ed.MoveCursor(-1)
+	ctx := &ActionContext{Editor: ed}
+
+	run(t, AcceptAutosuggestion, ctx)
+
+	if got := ctx.Editor.BufferString(); got != "foo" {
+		t.Fatalf("AcceptAutosuggestion before end: buffer = %q, want unchanged %q", got, "foo")
+	}
+	if got := ctx.Editor.Cursor(); got != 2 {
+		t.Fatalf("AcceptAutosuggestion before end: cursor = %d, want 2", got)
+	}
+}
+
+func TestAcceptAutosuggestionOrForward_AcceptsAtEnd(t *testing.T) {
+	ed := editor.New(editor.WithSuggester(staticSuggester{suggestion: []rune("bar")}))
+	ed.SetBuffer([]rune("foo"))
+	ed.TriggerAutoSuggestion()
+	ctx := &ActionContext{Editor: ed}
+
+	run(t, AcceptAutosuggestionOrForward, ctx)
+
+	if got := ctx.Editor.BufferString(); got != "foobar" {
+		t.Fatalf("AcceptAutosuggestionOrForward: buffer = %q, want %q", got, "foobar")
+	}
+	if got := ctx.Editor.Cursor(); got != 6 {
+		t.Fatalf("AcceptAutosuggestionOrForward: cursor = %d, want 6", got)
+	}
+}
+
+func TestAcceptAutosuggestionOrForward_MovesForwardBeforeEnd(t *testing.T) {
+	ed := editor.New(editor.WithSuggester(staticSuggester{suggestion: []rune("bar")}))
+	ed.SetBuffer([]rune("foo"))
+	ed.TriggerAutoSuggestion()
+	ed.MoveCursor(-2)
+	ctx := &ActionContext{Editor: ed}
+
+	run(t, AcceptAutosuggestionOrForward, ctx)
+
+	if got := ctx.Editor.BufferString(); got != "foo" {
+		t.Fatalf("AcceptAutosuggestionOrForward before end: buffer = %q, want unchanged %q", got, "foo")
+	}
+	if got := ctx.Editor.Cursor(); got != 2 {
+		t.Fatalf("AcceptAutosuggestionOrForward before end: cursor = %d, want 2", got)
 	}
 }
 
