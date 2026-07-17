@@ -409,6 +409,7 @@ func TestEditor_Reset(t *testing.T) {
 	e.Insert('a')
 	e.Insert('b')
 	e.SetSelectionAnchor(SelectionChar)
+	e.SetClampCursorBeforeEnd(true)
 	e.Reset()
 	if bufStr(e) != "" {
 		t.Fatalf("buffer not empty after Reset")
@@ -418,6 +419,15 @@ func TestEditor_Reset(t *testing.T) {
 	}
 	if e.Selection() != nil {
 		t.Fatalf("selection not nil after Reset")
+	}
+
+	// A previous vi normal-mode input must not leave the next insert-mode
+	// input unable to move its cursor past the final character.
+	e.Insert('a', 'b')
+	e.MoveCursor(-1)
+	e.MoveCursor(1)
+	if got, want := e.Cursor(), len(e.Runes()); got != want {
+		t.Fatalf("cursor = %d after Reset and moving to end, want %d", got, want)
 	}
 }
 
