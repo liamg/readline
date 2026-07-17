@@ -28,6 +28,10 @@ type Driver interface {
 	io.Writer
 }
 
+type cursorPositioner interface {
+	CursorPosition() (row, col int, err error)
+}
+
 // Renderer maintains the virtual cell buffer and emits minimal terminal writes
 // on each Render call, only touching the parts of the screen that changed.
 type Renderer struct {
@@ -404,6 +408,8 @@ func (r *Renderer) render(accepted bool) error {
 			}
 		}
 		showCompletionTitles := len(completionGroups) > 1 && len(completionGroups[0].Candidates)+2 < r.remainingRows()
+		selectedCompletion, hasSelectedCompletion := r.editor.SelectedCompletion()
+		completionIndex := 0
 		for _, group := range completionGroups {
 
 			// if more than one completion group is shown, include titles
@@ -431,6 +437,15 @@ func (r *Renderer) render(accepted bool) error {
 				w := ansi.VisibleWidth(candidate.Name)
 				rendereredWidth := 0
 				name := candidate.Name + strings.Repeat(" ", 1+(longestCandidateName-w))
+				style := ansi.Style{
+					Fg: ansi.Color{
+						Mode:  ansi.Color16,
+						Index: 4,
+					},
+				}
+				if hasSelectedCompletion && completionIndex == selectedCompletion {
+					style.Attr |= ansi.AttrReverse
+				}
 				for _, ru := range name {
 					rw := ansi.RuneWidth(ru)
 					if rendereredWidth+rw > r.width {
@@ -438,13 +453,8 @@ func (r *Renderer) render(accepted bool) error {
 					}
 					rendereredWidth += rw
 					completionLine = append(completionLine, Cell{
-						Rune: ru,
-						Style: ansi.Style{
-							Fg: ansi.Color{
-								Mode:  ansi.Color16,
-								Index: 4,
-							},
-						},
+						Rune:  ru,
+						Style: style,
 						Width: rw,
 					})
 				}
@@ -456,11 +466,13 @@ func (r *Renderer) render(accepted bool) error {
 					rendereredWidth += rw
 					completionLine = append(completionLine, Cell{
 						Rune:  ru,
+						Style: style,
 						Width: rw,
 					})
 				}
 
 				completionLines = append(completionLines, completionLine)
+				completionIndex++
 			}
 		}
 
@@ -483,6 +495,8 @@ func (r *Renderer) render(accepted bool) error {
 		}
 	}
 
+	r.anchorBottom()
+
 	// write to terminal
 	if err := r.writeDiff(); err != nil {
 		return err
@@ -491,8 +505,42 @@ func (r *Renderer) render(accepted bool) error {
 	return nil
 }
 
+func (r *Renderer) anchorBottom() {
+	if !r.config.AnchorBottom || r.height <= 0 {
+		return
+	}
+	positioner, ok := r.driver.(cursorPositioner)
+	if !ok {
+		return
+	}
+	row, _, err := positioner.CursorPosition()
+	if err != nil {
+		return
+	}
+	startRow := row - r.state.previousCursorY
+	if startRow < 1 {
+		startRow = 1
+	}
+	if startRow > r.height {
+		startRow = r.height
+	}
+	rows := queuedPhysicalRows(r.state.currentLines, r.width)
+	availableRows := r.height - startRow + 1
+	if rows >= availableRows {
+		return
+	}
+	padding := availableRows - rows
+	padded := make(QueuedLines, 0, padding+len(r.state.currentLines))
+	for range padding {
+		padded = append(padded, QueuedLine{})
+	}
+	padded = append(padded, r.state.currentLines...)
+	r.state.currentLines = padded
+}
+
 func (r *Renderer) writeDiff() error {
 	b := &bytes.Buffer{}
+	b.WriteString("\x1b[?25l")
 
 	currentLineCount := len(r.state.currentLines)
 	prevousLineCount := len(r.state.previousLines)
@@ -540,6 +588,7 @@ func (r *Renderer) writeDiff() error {
 		r.state.currentLines = nil
 		r.state.previousCursorY = cursorPhysicalY
 
+		b.WriteString("\x1b[?25h")
 		_, err := r.driver.Write(b.Bytes())
 		return err
 	}
@@ -612,6 +661,12 @@ func (r *Renderer) writeDiff() error {
 				_, _ = fmt.Fprint(b, "\r\n")
 			}
 
+			if len(cells) == 0 {
+				_, _ = fmt.Fprint(b, "\x1b[K")
+				continue
+			}
+
+			_, _ = fmt.Fprint(b, "\x1b[K")
 			for _, cell := range cells {
 				if cell.Style != currentStyle {
 					writeStyle(b, cell.Style)
@@ -635,6 +690,7 @@ func (r *Renderer) writeDiff() error {
 	}
 	// and correct column
 	_, _ = fmt.Fprintf(b, "\x1b[%dG", cursorX)
+	b.WriteString("\x1b[?25h")
 
 	// bump state
 	r.state.previousLines = r.state.currentLines

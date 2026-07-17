@@ -22,6 +22,7 @@ type Config struct {
 	History                  history.History
 	InputMode                InputMode
 	AutoWriteHistory         bool
+	AnchorBottom             bool
 	HidePromptOnSubmit       bool
 	HideAcceptedLineOnSubmit bool
 	Completer                completion.Completer
@@ -89,6 +90,12 @@ func WithInputMode(mode InputMode) Option {
 func WithHistoryAutoWrite(enabled bool) Option {
 	return func(c *Config) {
 		c.AutoWriteHistory = enabled
+	}
+}
+
+func WithAnchorBottom(enabled bool) Option {
+	return func(c *Config) {
+		c.AnchorBottom = enabled
 	}
 }
 

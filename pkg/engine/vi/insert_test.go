@@ -66,6 +66,25 @@ func TestVi_InsertModeEnterAccepts(t *testing.T) {
 	}
 }
 
+func TestVi_InsertModeShiftEnterInsertsNewline(t *testing.T) {
+	ed := editor.New()
+	eng := NewEngine(ed, nil)
+	eng.HandleKeyEvent(key('a'))
+	done, _, err := eng.HandleKeyEvent(terminal.KeyEvent{Key: terminal.KeyEnter, Mod: terminal.ModShift})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("expected done=false on Shift+Enter")
+	}
+	if got := ed.BufferString(); got != "a\n" {
+		t.Fatalf("buffer = %q, want %q", got, "a\n")
+	}
+	if got := eng.ActiveKeymap(); got != ModeInsert {
+		t.Fatalf("active keymap = %q, want %q", got, ModeInsert)
+	}
+}
+
 func TestVi_EscapeSwitchesToNormal(t *testing.T) {
 	ed := editor.New()
 	eng := NewEngine(ed, nil)
@@ -87,6 +106,28 @@ func TestVi_EscapeDismissesCompletions(t *testing.T) {
 
 	if ed.GetCompletions() != nil {
 		t.Fatal("completions should be dismissed after escape")
+	}
+}
+
+func TestVi_InsertModeArrowsNavigateVisibleCompletions(t *testing.T) {
+	ed := editor.New(editor.WithCompleter(insertModeCompleter{}))
+	eng := NewEngine(ed, nil)
+	ed.TriggerCompletions()
+
+	eng.HandleKeyEvent(namedKey(terminal.KeyDown))
+	if got, ok := ed.SelectedCompletion(); !ok || got != 1 {
+		t.Fatalf("after down selected completion = (%d, %v), want (1, true)", got, ok)
+	}
+	if got := eng.ActiveKeymap(); got != ModeInsert {
+		t.Fatalf("after down active keymap = %q, want %q", got, ModeInsert)
+	}
+
+	eng.HandleKeyEvent(namedKey(terminal.KeyUp))
+	if got, ok := ed.SelectedCompletion(); !ok || got != 0 {
+		t.Fatalf("after up selected completion = (%d, %v), want (0, true)", got, ok)
+	}
+	if got := eng.ActiveKeymap(); got != ModeInsert {
+		t.Fatalf("after up active keymap = %q, want %q", got, ModeInsert)
 	}
 }
 

@@ -4,10 +4,23 @@ import (
 	"testing"
 
 	"github.com/liamg/readline/pkg/editor"
+	"github.com/liamg/readline/pkg/editor/completion"
 	"github.com/liamg/readline/pkg/engine"
 	"github.com/liamg/readline/pkg/history"
 	"github.com/liamg/readline/pkg/terminal"
 )
+
+type completionTestCompleter struct{}
+
+func (completionTestCompleter) Complete(_ []rune, _ int) []completion.Group {
+	return []completion.Group{{
+		Candidates: []completion.Candidate{
+			{Name: "foo", Content: "foo"},
+			{Name: "bar", Content: "bar"},
+			{Name: "baz", Content: "baz"},
+		},
+	}}
+}
 
 func key(r rune) terminal.KeyEvent {
 	return terminal.KeyEvent{Key: terminal.KeyRune, Rune: r}
@@ -243,6 +256,38 @@ func TestEmacs_CtrlN_HistoryNext(t *testing.T) {
 	eng.HandleKeyEvent(ctrlKey('n')) // back to "cmd2"
 	if got := ed.BufferString(); got != "cmd2" {
 		t.Fatalf("buffer = %q, want %q", got, "cmd2")
+	}
+}
+
+func TestEmacs_ArrowsNavigateVisibleCompletions(t *testing.T) {
+	ed := editor.New(editor.WithCompleter(completionTestCompleter{}))
+	eng := NewEngine(ed, nil)
+	ed.TriggerCompletions()
+
+	eng.HandleKeyEvent(namedKey(terminal.KeyDown))
+	if got, ok := ed.SelectedCompletion(); !ok || got != 1 {
+		t.Fatalf("after down selected completion = (%d, %v), want (1, true)", got, ok)
+	}
+
+	eng.HandleKeyEvent(namedKey(terminal.KeyUp))
+	if got, ok := ed.SelectedCompletion(); !ok || got != 0 {
+		t.Fatalf("after up selected completion = (%d, %v), want (0, true)", got, ok)
+	}
+}
+
+func TestEmacs_CtrlPNNavigateVisibleCompletions(t *testing.T) {
+	ed := editor.New(editor.WithCompleter(completionTestCompleter{}))
+	eng := NewEngine(ed, nil)
+	ed.TriggerCompletions()
+
+	eng.HandleKeyEvent(ctrlKey('p'))
+	if got, ok := ed.SelectedCompletion(); !ok || got != 2 {
+		t.Fatalf("after ctrl-p selected completion = (%d, %v), want (2, true)", got, ok)
+	}
+
+	eng.HandleKeyEvent(ctrlKey('n'))
+	if got, ok := ed.SelectedCompletion(); !ok || got != 0 {
+		t.Fatalf("after ctrl-n selected completion = (%d, %v), want (0, true)", got, ok)
 	}
 }
 

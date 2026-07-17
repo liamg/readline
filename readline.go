@@ -492,9 +492,6 @@ func (r *Readline) Redraw() error {
 	}
 	r.renderer.UpdatePrompt()
 	r.renderer.UpdateStatusLine()
-	if err := r.renderer.Clear(r.driver); err != nil {
-		return err
-	}
 	return r.renderStateLocked()
 }
 
@@ -667,6 +664,14 @@ func (r *Readline) Readline() (line string, err error) {
 				}
 			}
 
+		case terminal.PasteEvent:
+			r.editor.Insert([]rune(normalizePastedText(event.Text))...)
+			r.editor.TriggerAutoSuggestion()
+			r.setCurrentBuffer(r.editor.BufferString())
+			if err := r.renderState(); err != nil {
+				return "", err
+			}
+
 		case terminal.ResizeEvent:
 			r.outputMu.Lock()
 			if err := r.renderer.ClearForResize(r.driver, event.Cols); err != nil {
@@ -681,6 +686,11 @@ func (r *Readline) Readline() (line string, err error) {
 			r.outputMu.Unlock()
 		}
 	}
+}
+
+func normalizePastedText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 // renderState calls RenderState with the current prompt and editor buffer,

@@ -79,6 +79,56 @@ func TestEditor_CompletionJoinAppendsOnContinuation(t *testing.T) {
 	}
 }
 
+func TestEditor_SelectCompletionWraps(t *testing.T) {
+	groups := oneGroup(
+		completion.Candidate{Name: "alpha"},
+		completion.Candidate{Name: "beta"},
+	)
+	e := New(WithCompleter(fakeCompleter{groups: groups}))
+	e.SetBuffer([]rune("a"))
+	e.TriggerCompletions()
+
+	if selected, ok := e.SelectedCompletion(); !ok || selected != 0 {
+		t.Fatalf("selected completion = (%d, %v), want (0, true)", selected, ok)
+	}
+	if !e.SelectPreviousCompletion() {
+		t.Fatal("SelectPreviousCompletion = false, want true")
+	}
+	if selected, _ := e.SelectedCompletion(); selected != 1 {
+		t.Fatalf("selected completion after previous = %d, want 1", selected)
+	}
+	if !e.SelectNextCompletion() {
+		t.Fatal("SelectNextCompletion = false, want true")
+	}
+	if selected, _ := e.SelectedCompletion(); selected != 0 {
+		t.Fatalf("selected completion after next = %d, want 0", selected)
+	}
+}
+
+func TestEditor_AcceptSelectedCompletion(t *testing.T) {
+	groups := oneGroup(
+		completion.Candidate{Name: "alpha"},
+		completion.Candidate{Name: "shown", Content: "actual", Join: "/"},
+	)
+	e := New(WithCompleter(fakeCompleter{groups: groups}))
+	e.SetBuffer([]rune("cmd a"))
+	e.TriggerCompletions()
+	e.SelectNextCompletion()
+
+	if !e.AcceptSelectedCompletion() {
+		t.Fatal("AcceptSelectedCompletion = false, want true")
+	}
+	if got := e.BufferString(); got != "cmd actual/" {
+		t.Fatalf("buffer = %q, want %q", got, "cmd actual/")
+	}
+	if got := e.Cursor(); got != len("cmd actual/") {
+		t.Fatalf("cursor = %d, want %d", got, len("cmd actual/"))
+	}
+	if e.GetCompletions() != nil {
+		t.Fatal("completions should clear after accepting selected candidate")
+	}
+}
+
 func TestEditor_CompletionNoCompleterIsNoop(t *testing.T) {
 	e := New()
 	e.SetBuffer([]rune("fo"))

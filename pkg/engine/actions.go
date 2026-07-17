@@ -47,6 +47,22 @@ var (
 			return ActionResult{Complete: true}, nil
 		},
 	}
+	AcceptCompletionOrLine = &Action{
+		Name: "accept-completion-or-line",
+		Func: func(c *ActionContext) (ActionResult, error) {
+			if c.Editor.AcceptSelectedCompletion() {
+				return ActionResult{}, nil
+			}
+			return ActionResult{Complete: true}, nil
+		},
+	}
+	InsertNewline = &Action{
+		Name: "insert-newline",
+		Func: func(c *ActionContext) (ActionResult, error) {
+			c.Editor.Insert('\n')
+			return ActionResult{}, nil
+		},
+	}
 	Back = &Action{
 		Name: "back",
 		Func: func(c *ActionContext) (ActionResult, error) {
@@ -86,6 +102,24 @@ var (
 		Func: func(c *ActionContext) (ActionResult, error) {
 			c.Editor.TriggerCompletions()
 			return ActionResult{}, nil
+		},
+	}
+	CompletionPreviousOrHistoryPrevious = &Action{
+		Name: "completion-previous-or-history-previous",
+		Func: func(c *ActionContext) (ActionResult, error) {
+			if c.Editor.SelectPreviousCompletion() {
+				return ActionResult{}, nil
+			}
+			return HistoryPrevious.Func(c)
+		},
+	}
+	CompletionNextOrHistoryNext = &Action{
+		Name: "completion-next-or-history-next",
+		Func: func(c *ActionContext) (ActionResult, error) {
+			if c.Editor.SelectNextCompletion() {
+				return ActionResult{}, nil
+			}
+			return HistoryNext.Func(c)
 		},
 	}
 	BeginningOfLine = &Action{
